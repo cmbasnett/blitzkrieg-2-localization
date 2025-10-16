@@ -1,14 +1,21 @@
+from glob import glob
 import sys
 from pathlib import Path
-import os
-from glob import glob
 import argparse
 from zipfile import ZipFile
 from typing import Iterable
 from collections import OrderedDict
+from typing import Optional, Dict, Set
+import toml
+
+def escape_string(string: str) -> str:
+    return string\
+        .replace('\r', '') \
+        .replace('\n', '\\n') \
+        .replace('\"', '\\"')
 
 
-def okay(key_value_pairs: Iterable[tuple[str, str]]):
+def get_potext(key_value_pairs: Iterable[tuple[str, str]]):
     lines = [
         "msgid \"\"",
         "msgstr \"\"",
@@ -21,78 +28,67 @@ def okay(key_value_pairs: Iterable[tuple[str, str]]):
 
     for key, value in key_value_pairs:
         lines.append(f'msgid "{key}"')
-
-        value_lines = value.splitlines(keepends=True)
-
         lines.append(f'msgstr ""')
-        for l in value_lines:
-            l = l.replace('\r', '')
-            l = l.replace('\n', '\\n')
-            l = l.replace('\"', '\\"')
-            lines.append(f'"{l}"')
+        lines.extend(map(lambda x: f'"{escape_string(x)}"', value.splitlines(keepends=True)))
         lines.append('')
 
     return '\n'.join(lines)
 
 
+def read_string_file(buffer: bytes) -> Optional[str]:
+    encodings = ('utf-16', 'utf-8')
+    for encoding in encodings:
+        try:
+            return buffer.decode(encoding)
+        except UnicodeDecodeError as e:
+            pass
+    return None
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('data_directory')
-    parser.add_argument('--output_directory', default='.', required=False)
-    parser.add_argument('--flatten', default=True, required=False)
-
-    # TODO: figure out in what order the game seems to be loading things in.
-    #  my guess is it goes data, texts then patch, in order of name.
+    parser.add_argument('data_directory', help='The directory that contains the data')
+    parser.add_argument('output_path')
+    parser.add_argument('--config_path', default='config.toml', required=False)
 
     args = parser.parse_args()
 
+    config_path = Path(args.config_path).expanduser().resolve()
+    config = toml.load(open(config_path))
+
+    # TODO: figure out in what order the game seems to be loading things in.
+    #  my guess is it goes in alphabetical order.
     data_directory = Path(args.data_directory)
 
     if not data_directory.is_dir(follow_symlinks=True):
         sys.exit(1)
 
-    pathname = str(data_directory / '*.pak')
-    encodings = ('utf-16', 'utf-8')
+    data: Dict[str, str] = OrderedDict()
 
-    data = OrderedDict()
+    # Read all text files in the OS file system.
+    text_paths: Set[Path] = set()
+    for pattern in config['files']['include']['path_patterns']:
+        for path in glob(f'**/{pattern}', root_dir=data_directory, recursive=True):
+            text_paths.add(Path(path))
+        
+    for text_path in text_paths:
+        data[text_path] = read_string_file(open(data_directory / text_path, 'rb').read())
+
+    # Read all text files in the archive files.
+    archive_paths = set()
+    for pattern in config['archive']['path_patterns']:
+        for path in glob(pattern, root_dir=data_directory):
+            archive_paths.add(data_directory / path)
     
-    for path in glob(pathname):
-        # Path(path)
+    for path in archive_paths:
         zipfile = ZipFile(path)
         for name in zipfile.namelist():
-            p = Path(name)
-            if p.suffix != '.txt':
+            path = Path(name)
+            if not any(map(lambda x: path.match(x), config['files']['include']['path_patterns'])):
                 continue
-            d = zipfile.read(str(p))
-            s = None
-            for encoding in encodings:
-                try:
-                    s = d.decode(encoding)
-                    break
-                except UnicodeDecodeError as e:
-                    pass
-            if s is None:
-                print(f'Failed to decode {name}')
-                continue
-            data[name] = s
+            data[name] = read_string_file(zipfile.read(str(path)))
 
-    output_directory = Path(args.output_directory).resolve()
-    os.makedirs(output_directory, exist_ok=True)
-
-    components = OrderedDict()
-    # Go through each data item and split them based on the top-level directory that they're in.
-
-    print(len(data))
-
-    for key, value in data.items():
-        component = Path(key).parts[0].lower()
-        if component not in components:
-            components[component] = OrderedDict()
-        # print(component)
-        components[component][key] = value
-
-    for component, strings in components.items():
-        output_path = output_directory / f'{component}.en.po'
-        with open(output_path, 'w') as fp:
-            lines = okay(strings.items())
-            fp.writelines(lines)
+    # Write out the file.
+    output_path = Path(args.output_path).expanduser().resolve()
+    with open(output_path, 'w', encoding='utf-8') as fp:
+        fp.write(get_potext(data.items()))

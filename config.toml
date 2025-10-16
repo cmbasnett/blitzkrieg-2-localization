@@ -1,0 +1,13 @@
+[archive]
+path_patterns = ["*.pak"]
+
+[files]
+
+[files.include]
+path_patterns = ["*.txt"]
+
+[files.exclude]
+path_patterns = [
+    # This is a LUA script that seems to have been given the wrong extension.
+    "scenario/campaigns/ussr/chapter4/rus4.3/4.3_text.txt"
+    ]
